@@ -1,0 +1,115 @@
+---
+ecommerce:
+  needs:
+    - aws-k8s
+  steps:
+    - name: order-tracker-bucket
+      extension: S3
+      tags: storage
+      description: This step deploy a S3 bucket for tracking orders
+      args:
+        region: !secret aws.region
+        partial_bucket_name: "order-tracker-bucket"
+        tags: '{"deployment" = "ecommerce", "environment" = "production", "type" = "datastore", "security" = "crown-jewels",}'
+      outputs:
+        - bucket_name
+    - name: order-tracker-lambda
+      needs:
+        - order-tracker-bucket
+        - vpc
+      extension: LambdaApiGateway
+      tags: application
+      description: This step deploy a Lambda function for tracking orders
+      helpers:
+        - helper: RunCommand
+          args:
+            commands:
+              - ["mkdir", "lambda"]
+              - ["curl", "-o", "lambda/index.js", "https://raw.githubusercontent.com/lacework-demo/unhackable-ecommerce-app/main/lambda/index.js"]
+      args:
+        region: !secret aws.region
+        bucket_name: !lookup /ecommerce/order-tracker-bucket/outputs/bucket_name
+        lambda_name: "order-tracking-function"
+        lambda_runtime: "nodejs16.x"
+        api_endpoint_name: "trackOrder"
+        lambda_handler: "index.handler"
+        vpc_id: !lookup /aws-k8s/k8s/outputs/vpc_id
+        subnet_0: !lookup /aws-k8s/k8s/outputs/private_subnet_id,0
+        subnet_1: !lookup /aws-k8s/k8s/outputs/private_subnet_id,1
+      outputs:
+        - lambda_invoke_url
+    - name: ecommerce
+      extension: Kubectl
+      tags: applications
+      source:
+        location: https://raw.githubusercontent.com/lacework-demo/unhackable-ecommerce-app/main/ecommerce.yml
+        templates:
+          - "ecommerce.yml"
+      helpers:
+        - helper: WriteValue
+          run_on_dryrun: true
+          args:
+            name: kubectl_config
+            dstfile: kubectl
+        - helper: GenerateOutput
+          lifecycle: [ afterCreate ]
+          args:
+            dst: "frontend_app_url"
+            format: "http://{{ .frontend_ip }}"
+      needs:
+        - instance
+      args:
+        track_order_url: !lookup /ecommerce/order-tracker-lambda/outputs/lambda_invoke_url
+        control_plane_url: !lookup /aws-k8s/k8s/outputs/cluster_endpoint
+        kubectl_config: !lookup /aws-k8s/k8s/outputs/kubectl_config
+        kubectl_config_file: kubectl
+        kube_manifest_path: ecommerce.yml
+        cidr_block:
+          - !lookup /instance/outputs/ip
+          - "${DETC_MY_IP}"
+        wait_for:
+           frontend_ip:
+             resource_type: svc
+             resource_name: ecommerce-website
+             json_path: "{.status.loadBalancer.ingress[0].hostname}"
+    - name: vpc
+      extension: VPC.AWS
+      tags: infrastructure
+      args:
+        name: "ecommerce-vpc"
+    - name: instance
+      extension: EC2Instance
+      tags: infra
+      needs:
+        - vpc
+      args:
+        vpc_id: !lookup /vpc/outputs/vpc_id
+        subnet: !lookup /vpc/outputs/subnet_id1
+        instance_name: "ecom-traffic"
+    - name: traffic
+      extension: Ansible
+      source: https://raw.githubusercontent.com/lacework-demo/unhackable-ecommerce-app/main/deploy/ansible/traffic.yml
+      needs:
+        - instance
+        - ecommerce
+      helpers:
+        - helper: ServiceAvailable
+          args:
+            max_wait: 60 # seconds
+            hostname: !lookup /instance/outputs/ip
+            port: 22
+        - helper: WriteValue
+          run_on_dryrun: true
+          args:
+            raw_value: !lookupSecret /instance/outputs/pem
+            dstfile: instance.pem
+            mode: 0600
+      args:
+        user: "ubuntu"
+        private_key: instance.pem
+        inventory: !lookup /instance/outputs/ip
+        playbook: traffic.yml
+        privilege_escalation:
+          become: true
+        extra_vars:
+          ecomm_home_url: !lookup /ecommerce/outputs/frontend_app_url

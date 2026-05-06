@@ -1,0 +1,48 @@
+---
+- name: Traffic Driver
+  hosts: all
+  remote_user: ubuntu
+
+  tasks:
+  - name: Write systemd config file
+    copy:
+      dest: /home/ubuntu/traffic.sh
+      content: |
+        #!/bin/bash
+        while :
+        do
+          curl {{ ecomm_home_url }}
+          curl {{ ecomm_home_url }}/products
+          curl {{ ecomm_home_url }}/login
+          curl {{ ecomm_home_url }}/orders
+          sleep 1
+        done
+        EOFBASH
+
+  - name: Make traffic.sh executable
+    file: dest=/home/ubuntu/traffic.sh mode=a+x
+
+  - name: Write systemd config file
+    blockinfile:
+      path: /etc/systemd/system/loadgen.service
+      create: true
+      state: present
+      block: |
+        [Unit]
+        Description=Loadgen web traffic driver
+
+        [Service]
+        PIDFile=/tmp/traffic-99.pid
+        Restart=always
+        KillSignal=SIGQUIT
+        WorkingDirectory=/home/ubuntu/
+        ExecStart=/home/ubuntu/traffic.sh
+
+        [Install]
+        WantedBy=multi-user.target
+
+  - name: Make sure a service unit is running
+    ansible.builtin.systemd:
+      name: loadgen.service
+      enabled: yes
+      state: started

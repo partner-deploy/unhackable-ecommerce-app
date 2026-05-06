@@ -1,0 +1,71 @@
+---
+ecommerce:
+  needs:
+    - azure-k8s
+  steps:
+    - name: ecommerce
+      extension: Kubectl
+      tags: applications
+      source:
+        location: https://raw.githubusercontent.com/lacework-demo/unhackable-ecommerce-app/main/ecommerce.yml
+        templates:
+          - "ecommerce.yml"
+      helpers:
+        - helper: WriteValue
+          run_on_dryrun: true
+          args:
+            name: kubectl_config
+            dstfile: kubectl
+        - helper: GenerateOutput
+          lifecycle: [ afterCreate ]
+          args:
+            dst: "frontend_app_url"
+            format: "http://{{ .frontend_ip }}"
+      needs:
+        - instance
+      args:
+        control_plane_url: !lookup /azure-k8s/k8s/outputs/cluster_endpoint
+        kubectl_config: !lookup /azure-k8s/k8s/outputs/kubectl_config
+        kubectl_config_file: kubectl
+        kube_manifest_path: ecommerce.yml
+        cidr_block:
+          - !lookup /instance/outputs/ip
+          - "${DETC_MY_IP}"
+        wait_for:
+           frontend_ip:
+             resource_type: svc
+             resource_name: ecommerce-website
+             json_path: "{.status.loadBalancer.ingress[0].ip}"
+    - name: instance
+      extension: AzureCompute
+      tags: infra
+      args:
+        region: !secret azure.region
+        instance_name: "ecom-traffic"
+    - name: traffic
+      extension: Ansible
+      source: https://raw.githubusercontent.com/lacework-demo/unhackable-ecommerce-app/main/deploy/ansible/traffic.yml
+      needs:
+        - instance
+        - ecommerce
+      helpers:
+        - helper: ServiceAvailable
+          args:
+            max_wait: 60 # seconds
+            hostname: !lookup /instance/outputs/ip
+            port: 22
+        - helper: WriteValue
+          run_on_dryrun: true
+          args:
+            raw_value: !lookupSecret /instance/outputs/ssh_key
+            dstfile: instance.ssh_key
+            mode: 0600
+      args:
+        user: "ubuntu"
+        private_key: instance.ssh_key
+        inventory: !lookup /instance/outputs/ip
+        playbook: traffic.yml
+        privilege_escalation:
+          become: true
+        extra_vars:
+          ecomm_home_url: !lookup /ecommerce/outputs/frontend_app_url
